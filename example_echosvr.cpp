@@ -17,7 +17,8 @@
 */
 
 
-
+#include "co_apis.h"
+using namespace libcow;
 #include "co_routine.h"
 
 #include <stdio.h>
@@ -26,20 +27,27 @@
 #include <sys/time.h>
 #include <stack>
 
+#ifndef ZPort
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <sys/un.h>
-#include <fcntl.h>
 #include <arpa/inet.h>
+#include <sys/wait.h>
+#else
+#include <winsock2.h>
+#endif
+#include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
-#include <sys/wait.h>
 
 #ifdef __FreeBSD__
 #include <cstring>
 #include <sys/types.h>
 #include <sys/wait.h>
 #endif
+
+#include <vector>
+#include <thread>
 
 using namespace std;
 struct task_t
@@ -48,7 +56,7 @@ struct task_t
 	int fd;
 };
 
-static stack<task_t*> g_readwrite;
+__thread stack<task_t*>* g_readwrite = 0;
 static int g_listen_fd = -1;
 static int SetNonBlock(int iSock)
 {
@@ -72,7 +80,7 @@ static void *readwrite_routine( void *arg )
 	{
 		if( -1 == co->fd )
 		{
-			g_readwrite.push( co );
+			g_readwrite->push( co );
 			co_yield_ct();
 			continue;
 		}
@@ -85,34 +93,46 @@ static void *readwrite_routine( void *arg )
 			struct pollfd pf = { 0 };
 			pf.fd = fd;
 			pf.events = (POLLIN|POLLERR|POLLHUP);
-			co_poll( co_get_epoll_ct(),&pf,1,1000);
+			//co_poll( co_get_epoll_ct(),&pf,1,1000);
 
-			int ret = read( fd,buf,sizeof(buf) );
+			int ret = libcow::read( fd,buf,sizeof(buf) );
+            if (ret < 0)
+            {
+                printf("co %p read ret %d errno %d (%s)\n",
+						co_self(), ret,errno,strerror(errno));
+            }
 			if( ret > 0 )
 			{
-				ret = write( fd,buf,ret );
-			}
+				ret = libcow::write( fd,buf,ret );
+                if (ret < 0)
+                {
+                    printf("co %p write ret %d errno %d (%s)\n",
+                        co_self(), ret,errno,strerror(errno));
+                }
+			} 
+			
 			if( ret > 0 || ( -1 == ret && EAGAIN == errno ) )
 			{
-				continue;
-			}
-			close( fd );
+				continue; 
+			} 
+			printf("close fd %d becauseof ret %d\n", fd, ret);
+			libcow::close( fd );
 			break;
 		}
 
 	}
 	return 0;
 }
-int co_accept(int fd, struct sockaddr *addr, socklen_t *len );
+//int co_accept(int fd, struct sockaddr *addr, socklen_t *len );
 static void *accept_routine( void * )
 {
 	co_enable_hook_sys();
 	printf("accept_routine\n");
 	fflush(stdout);
 	for(;;)
-	{
-		//printf("pid %ld g_readwrite.size %ld\n",getpid(),g_readwrite.size());
-		if( g_readwrite.empty() )
+	{ 
+		printf("pid %ld g_readwrite->size %ld\n",getpid(),g_readwrite->size()); 
+		if( g_readwrite->empty() )
 		{
 			printf("empty\n"); //sleep
 			struct pollfd pf = { 0 };
@@ -135,17 +155,18 @@ static void *accept_routine( void * )
 			co_poll( co_get_epoll_ct(),&pf,1,1000 );
 			continue;
 		}
-		if( g_readwrite.empty() )
+		if( g_readwrite->empty() )
 		{
-			close( fd );
+			libcow::close( fd ); 
 			continue;
 		}
-		SetNonBlock( fd );
-		task_t *co = g_readwrite.top();
+		//SetNonBlock( fd );
+		task_t *co = g_readwrite->top();
+        printf("accept ok fd: %d\n", fd);
 		co->fd = fd;
-		g_readwrite.pop();
+		g_readwrite->pop(); 
 		co_resume( co->co );
-	}
+	} 
 	return 0;
 }
 
@@ -172,7 +193,7 @@ static void SetAddr(const char *pszIP,const unsigned short shPort,struct sockadd
 
 static int CreateTcpSocket(const unsigned short shPort /* = 0 */,const char *pszIP /* = "*" */,bool bReuse /* = false */)
 {
-	int fd = socket(AF_INET,SOCK_STREAM, IPPROTO_TCP);
+	int fd = libcow::socket(AF_INET,SOCK_STREAM, IPPROTO_TCP);
 	if( fd >= 0 )
 	{
 		if(shPort != 0)
@@ -180,14 +201,14 @@ static int CreateTcpSocket(const unsigned short shPort /* = 0 */,const char *psz
 			if(bReuse)
 			{
 				int nReuseAddr = 1;
-				setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&nReuseAddr,sizeof(nReuseAddr));
+				setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,(char*)&nReuseAddr,sizeof(nReuseAddr));
 			}
 			struct sockaddr_in addr ;
 			SetAddr(pszIP,shPort,addr);
 			int ret = bind(fd,(struct sockaddr*)&addr,sizeof(addr));
 			if( ret != 0)
 			{
-				close(fd);
+				libcow::close(fd);
 				return -1;
 			}
 		}
@@ -198,6 +219,11 @@ static int CreateTcpSocket(const unsigned short shPort /* = 0 */,const char *psz
 
 int main(int argc,char *argv[])
 {
+    WORD wVersionRequested;
+    WSADATA wsaData;
+    wVersionRequested = MAKEWORD(2, 2);
+    WSAStartup(wVersionRequested, &wsaData);
+    
 	if(argc<5){
 		printf("Usage:\n"
                "example_echosvr [IP] [PORT] [TASK_COUNT] [PROCESS_COUNT]\n"
@@ -220,36 +246,32 @@ int main(int argc,char *argv[])
 
 	SetNonBlock( g_listen_fd );
 
+    std::vector<std::thread> children;
 	for(int k=0;k<proccnt;k++)
 	{
+        children.emplace_back(std::move(
+            std::thread([=]{
+                g_readwrite = new stack<task_t*>;
+                for(int i=0;i<cnt;i++)
+                {
+                    task_t * task = (task_t*)calloc( 1,sizeof(task_t) );
+                    task->fd = -1;
 
-		pid_t pid = fork();
-		if( pid > 0 )
-		{
-			continue;
-		}
-		else if( pid < 0 )
-		{
-			break;
-		}
-		for(int i=0;i<cnt;i++)
-		{
-			task_t * task = (task_t*)calloc( 1,sizeof(task_t) );
-			task->fd = -1;
+                    co_create( &(task->co),NULL,readwrite_routine,task );
+                    co_resume( task->co );
 
-			co_create( &(task->co),NULL,readwrite_routine,task );
-			co_resume( task->co );
+                }
+                stCoRoutine_t *accept_co = NULL;
+                co_create( &accept_co,NULL,accept_routine,0 );
+                co_resume( accept_co );
 
-		}
-		stCoRoutine_t *accept_co = NULL;
-		co_create( &accept_co,NULL,accept_routine,0 );
-		co_resume( accept_co );
-
-		co_eventloop( co_get_epoll_ct(),0,0 );
-
-		exit(0);
+                co_eventloop( co_get_epoll_ct(),0,0 );
+            })));
 	}
-	if(!deamonize) wait(NULL);
+	for (auto& thr : children)
+        thr.join();
+    
+    WSACleanup();
 	return 0;
 }
 

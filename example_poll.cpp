@@ -16,6 +16,8 @@
 * limitations under the License.
 */
 
+#include "co_apis.h"
+using namespace libcow;
 #include "co_routine.h"
 
 #include <stdio.h>
@@ -24,11 +26,16 @@
 #include <sys/time.h>
 #include <stack>
 
+#ifndef ZPort
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <sys/un.h>
-#include <fcntl.h>
 #include <arpa/inet.h>
+#else
+#include <winsock2.h>
+#endif
+
+#include <fcntl.h>
 #include <errno.h>
 #include <vector>
 #include <set>
@@ -83,7 +90,7 @@ static void SetAddr(const char *pszIP,const unsigned short shPort,struct sockadd
 
 static int CreateTcpSocket(const unsigned short shPort  = 0 ,const char *pszIP  = "*" ,bool bReuse  = false )
 {
-	int fd = socket(AF_INET,SOCK_STREAM, IPPROTO_TCP);
+	int fd = libcow::socket(AF_INET,SOCK_STREAM, IPPROTO_TCP);
 	if( fd >= 0 )
 	{
 		if(shPort != 0)
@@ -91,7 +98,7 @@ static int CreateTcpSocket(const unsigned short shPort  = 0 ,const char *pszIP  
 			if(bReuse)
 			{
 				int nReuseAddr = 1;
-				setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&nReuseAddr,sizeof(nReuseAddr));
+				setsockopt(fd,SOL_SOCKET,SO_REUSEADDR, (char*)&nReuseAddr,sizeof(nReuseAddr));
 			}
 			struct sockaddr_in addr ;
 			SetAddr(pszIP,shPort,addr);
@@ -114,7 +121,7 @@ static void *poll_routine( void *arg )
 	for(size_t i=0;i<v.size();i++)
 	{
 		int fd = CreateTcpSocket();
-		SetNonBlock( fd );
+		//SetNonBlock( fd );
 		v[i].fd = fd;
 
 		int ret = connect(fd,(struct sockaddr*)&v[i].addr,sizeof( v[i].addr )); 
@@ -179,6 +186,11 @@ static void *poll_routine( void *arg )
 }
 int main(int argc,char *argv[])
 {
+    WORD wVersionRequested;
+    WSADATA wsaData;
+    wVersionRequested = MAKEWORD(2, 2);
+    WSAStartup(wVersionRequested, &wsaData);
+    
 	vector<task_t> v;
 	for(int i=1;i<argc;i+=2)
 	{
@@ -205,6 +217,7 @@ int main(int argc,char *argv[])
 
 	co_eventloop( co_get_epoll_ct(),0,0 );
 
+    WSACleanup();
 	return 0;
 }
 //./example_poll 127.0.0.1 12365 127.0.0.1 12222 192.168.1.1 1000 192.168.1.2 1111

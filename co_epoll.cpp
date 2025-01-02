@@ -26,15 +26,15 @@
 
 int	co_epoll_wait( int epfd,struct co_epoll_res *events,int maxevents,int timeout )
 {
-	return epoll_wait( epfd,events->events,maxevents,timeout );
+	return epoll_wait( (HANDLE)epfd,events->events,maxevents,timeout );
 }
 int	co_epoll_ctl( int epfd,int op,int fd,struct epoll_event * ev )
 {
-	return epoll_ctl( epfd,op,fd,ev );
+	return epoll_ctl( (HANDLE)epfd,op,fd,ev );
 }
 int	co_epoll_create( int size )
 {
-	return epoll_create( size );
+	return (int)epoll_create( size );
 }
 
 struct co_epoll_res *co_epoll_res_alloc( int n )

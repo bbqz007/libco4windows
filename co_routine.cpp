@@ -16,6 +16,25 @@
 * limitations under the License.
 */
 
+/*
+* experiment and porting tencent/libco to windows using wepoll.
+* modifications by bbqz007.
+
+* Copyright (C) 2025, bbqz007, github.com/bbqz007. All rights reserved.
+*
+* Licensed under the Apache License, Version 2.0 (the "License"); 
+* you may not use this file except in compliance with the License. 
+* You may obtain a copy of the License at
+*
+*	http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, 
+* software distributed under the License is distributed on an "AS IS" BASIS, 
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. 
+* See the License for the specific language governing permissions and 
+* limitations under the License.
+*/
+
 #include "co_routine.h"
 #include "co_routine_inner.h"
 #include "co_epoll.h"
@@ -26,23 +45,29 @@
 #include <string>
 #include <map>
 
+#ifndef ZPort
 #include <poll.h>
+#endif 
 #include <sys/time.h>
 #include <errno.h>
 
 #include <assert.h>
 
 #include <fcntl.h>
+#ifndef ZPort
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/syscall.h>
+#else
+#include <winsock2.h>
+#endif
 #include <unistd.h>
 #include <limits.h>
 
 extern "C"
 {
-	extern void coctx_swap( coctx_t *,coctx_t* ) asm("coctx_swap");
+	extern void coctx_swap( coctx_t *,coctx_t* ) asm("_coctx_swap");
 };
 using namespace std;
 stCoRoutine_t *GetCurrCo( stCoRoutineEnv_t *env );
@@ -57,10 +82,17 @@ struct stCoRoutineEnv_t
 	//for copy stack log lastco and nextco
 	stCoRoutine_t* pending_co;
 	stCoRoutine_t* occupy_co;
+    
+    /// Z#20250103
+    stCoCond_t* cond_sleepfor;
 };
 //int socket(int domain, int type, int protocol);
 void co_log_err( const char *fmt,... )
 {
+    va_list args;                // Declare a variable to hold the argument list
+    va_start(args, fmt);         // Initialize the argument list with va_start
+    vfprintf(stderr, fmt, args); // Print the formatted output to stderr
+    va_end(args);                // Clean up the argument list
 }
 
 
@@ -739,6 +771,24 @@ static short EpollEvent2Poll( uint32_t events )
 
 static __thread stCoRoutineEnv_t* gCoEnvPerThread = NULL;
 
+void co_uninit_curr_thread_env()
+{
+    /// Z#20250103
+    /// damage the tencent/libco, they even have a uninit?!
+    stCoRoutineEnv_t *env = gCoEnvPerThread;
+    if (!env)
+        return;
+    /// Z#20250103
+    ///  i am not sure the tencent/libco can how to correctly cleanup every thing.
+    ///  i only clean the codes what i add.
+    ///  damage them, even the ccctx has no uninit()
+    if (env->cond_sleepfor)
+        co_cond_free(env->cond_sleepfor);
+    env->cond_sleepfor = 0;
+    
+    printf("damage the tencent/libco, every thing has no uninit()\n");
+}
+
 void co_init_curr_thread_env()
 {
 	gCoEnvPerThread = (stCoRoutineEnv_t*)calloc( 1, sizeof(stCoRoutineEnv_t) );
@@ -757,6 +807,8 @@ void co_init_curr_thread_env()
 
 	stCoEpoll_t *ev = AllocEpoll();
 	SetEpoll( env,ev );
+    
+    env->cond_sleepfor = co_cond_alloc();    /// Z#20250103
 }
 stCoRoutineEnv_t *co_get_curr_thread_env()
 {
@@ -959,7 +1011,9 @@ int co_poll_inner( stCoEpoll_t *ctx,struct pollfd fds[], nfds_t nfds, int timeou
 		arg.pPollItems[i].pfnPrepare = OnPollPreparePfn;
 		struct epoll_event &ev = arg.pPollItems[i].stEvent;
 
-		if( fds[i].fd > -1 )
+        /// Z#20241231, bug, 
+        ///  pollfd.fd in win32 is type of HANDLE, HANDLE > -1 always be false.
+		if( (int)fds[i].fd > -1 )
 		{
 			ev.data.ptr = arg.pPollItems + i;
 			ev.events = PollEvent2Epoll( fds[i].events );
@@ -967,6 +1021,7 @@ int co_poll_inner( stCoEpoll_t *ctx,struct pollfd fds[], nfds_t nfds, int timeou
 			int ret = co_epoll_ctl( epfd,EPOLL_CTL_ADD, fds[i].fd, &ev );
 			if (ret < 0 && errno == EPERM && nfds == 1 && pollfunc != NULL)
 			{
+                printf("EPOLL_CTL_ADD failed, fd %d\n", fds[i].fd);
 				if( arg.pPollItems != arr )
 				{
 					free( arg.pPollItems );
@@ -1073,6 +1128,41 @@ int co_setspecific(pthread_key_t key, const void *value)
 	co->aSpec[ key ].value = (void*)value;
 	return 0;
 }
+
+#ifdef ZPort
+int co_getlasterror()
+{
+    stCoRoutine_t *co = GetCurrThreadCo();
+    if( !co || co->cIsMain )
+	{
+		return WSAGetLastError();
+	}
+	/// Z#20250103, doc
+	///  the correct usage of co->aSpec is by class clsRoutineData_routine_##name
+	///  it can alloc a right key
+	///  a customer key must conflict to clsRoutineData_routine_##name or pthread_create_key.
+	return (int)co->aSpec[ sizeof(co->aSpec)/sizeof(co->aSpec[0])-1 ].value;
+}
+int co_setlasterror(int err)
+{
+    stCoRoutine_t *co = GetCurrThreadCo();
+    if( !co || co->cIsMain )
+	{
+		return WSASetLastError(err), err;
+	}
+	(int&)co->aSpec[ sizeof(co->aSpec)/sizeof(co->aSpec[0])-1 ].value = err;
+    return err;
+}
+void co_sleepfor(int ms)
+{
+    auto* env = co_get_curr_thread_env();
+    if (env)
+    {
+        co_cond_timedwait(env->cond_sleepfor, ms);
+        return;
+    }
+}
+#endif
 
 
 

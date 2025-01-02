@@ -16,11 +16,16 @@
 * limitations under the License.
 */
 
-.globl coctx_swap
+#define ZPort
+.globl _coctx_swap
+#ifndef ZPort
 #if !defined( __APPLE__ )
 .type  coctx_swap, @function
 #endif
-coctx_swap:
+#else
+.def	_coctx_swap;	.scl	2;	.type 32;	.endef
+#endif // ZPort
+_coctx_swap:
 
 #if defined(__i386__)
     movl 4(%esp), %eax

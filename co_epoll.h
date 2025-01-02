@@ -28,7 +28,7 @@
 
 #if !defined( __APPLE__ ) && !defined( __FreeBSD__ )
 
-#include <sys/epoll.h>
+#include "wepoll.h"       /// ZPort
 
 struct co_epoll_res
 {

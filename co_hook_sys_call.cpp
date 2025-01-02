@@ -16,17 +16,60 @@
 * limitations under the License.
 */
 
+/*
+* experiment and porting tencent/libco to windows using wepoll.
+* modifications by bbqz007.
+
+* Copyright (C) 2025, bbqz007, github.com/bbqz007. All rights reserved.
+*
+* Licensed under the Apache License, Version 2.0 (the "License"); 
+* you may not use this file except in compliance with the License. 
+* You may obtain a copy of the License at
+*
+*	http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, 
+* software distributed under the License is distributed on an "AS IS" BASIS, 
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. 
+* See the License for the specific language governing permissions and 
+* limitations under the License.
+*/
+
+#define ZPort
+#ifndef ZPort
 #include <sys/socket.h>
+#else
+#include <winsock2.h>
+#endif
 #include <sys/time.h>
+#ifndef ZPort
 #include <sys/syscall.h>
 #include <sys/un.h>
+#endif
 
+#ifndef ZPort
 #include <dlfcn.h>
 #include <poll.h>
+#else
+typedef unsigned long int nfds_t;
+#endif
 #include <unistd.h>
 #include <fcntl.h>
+#ifdef ZPort
+#define O_NONBLOCK 0x800
+#define O_NDELAY        O_NONBLOCK
+#define F_DUPFD                0        /* dup */
+#define F_GETFD                1        /* get close_on_exec */
+#define F_SETFD                2        /* set/clear close_on_exec */
+#define F_GETFL                3        /* get file->f_flags */
+#define F_SETFL                4        /* set file->f_flags */
+#endif
 
+#ifndef ZPort
 #include <netinet/in.h>
+#else
+#include <Ws2tcpip.h>
+#endif
 #include <errno.h>
 #include <time.h>
 
@@ -37,8 +80,10 @@
 #include <stdarg.h>
 #include <pthread.h>
 
+#ifndef ZPort
 #include <resolv.h>
 #include <netdb.h>
+#endif
 
 #include <time.h>
 #include <map>
@@ -90,6 +135,14 @@ typedef int (*setsockopt_pfn_t)(int socket, int level, int option_name,
 typedef int (*fcntl_pfn_t)(int fildes, int cmd, ...);
 typedef struct tm *(*localtime_r_pfn_t)( const time_t *timep, struct tm *result );
 
+#ifdef ZPort
+extern int co_poll_inner(stCoEpoll_t*, pollfd*, unsigned long, int, int (*)(pollfd*, unsigned long, int));
+namespace libcow
+{
+#endif 
+
+#ifndef ZPort
+
 typedef void *(*pthread_getspecific_pfn_t)(pthread_key_t key);
 typedef int (*pthread_setspecific_pfn_t)(pthread_key_t key, const void *value);
 
@@ -100,6 +153,7 @@ typedef hostent* (*gethostbyname_pfn_t)(const char *name);
 typedef res_state (*__res_state_pfn_t)();
 typedef int (*__poll_pfn_t)(struct pollfd fds[], nfds_t nfds, int timeout);
 typedef int (*gethostbyname_r_pfn_t)(const char* __restrict name, struct hostent* __restrict __result_buf, char* __restrict __buf, size_t __buflen, struct hostent** __restrict __result, int* __restrict __h_errnop);
+
 
 static socket_pfn_t g_sys_socket_func 	= (socket_pfn_t)dlsym(RTLD_NEXT,"socket");
 static connect_pfn_t g_sys_connect_func = (connect_pfn_t)dlsym(RTLD_NEXT,"connect");
@@ -148,6 +202,97 @@ static pthread_rwlock_unlock_pfn_t g_sys_pthread_rwlock_unlock_func
 			= (pthread_rwlock_unlock_pfn_t)dlsym(RTLD_NEXT,"pthread_rwlock_unlock");
 */
 
+#else
+int fcntl(int fildes, int cmd, ...);
+int poll(struct pollfd fds[], nfds_t nfds, int timeout);
+
+int win32_poll(struct pollfd fds[], nfds_t nfds, int timeout_ms) {
+    fd_set readfds, writefds, exceptfds;
+    struct timeval timeout;
+    int ret, i;
+
+    // Initialize fd_sets
+    FD_ZERO(&readfds);
+    FD_ZERO(&writefds);
+    FD_ZERO(&exceptfds);
+
+    // Set up the timeout
+    timeout.tv_sec = timeout_ms / 1000;
+    timeout.tv_usec = (timeout_ms % 1000) * 1000;
+
+    // Loop through the file descriptors and set them in the appropriate fd_sets
+    for (i = 0; i < nfds; i++) {
+        if (fds[i].events & POLLIN) {
+            FD_SET(fds[i].fd, &readfds);
+        }
+        if (fds[i].events & POLLOUT) {
+            FD_SET(fds[i].fd, &writefds);
+        }
+        if (fds[i].events & POLLERR) {
+            FD_SET(fds[i].fd, &exceptfds);
+        }
+    }
+
+    // Call select to wait for events
+    ret = select(0, &readfds, &writefds, &exceptfds, &timeout);
+
+    if (ret > 0) {
+        // Update revents for each fd based on select results
+        for (i = 0; i < nfds; i++) {
+            fds[i].revents = 0;  // Clear revents
+
+            if (FD_ISSET(fds[i].fd, &readfds)) {
+                fds[i].revents |= POLLIN;
+            }
+            if (FD_ISSET(fds[i].fd, &writefds)) {
+                fds[i].revents |= POLLOUT;
+            }
+            if (FD_ISSET(fds[i].fd, &exceptfds)) {
+                fds[i].revents |= POLLERR;
+            }
+        }
+    }
+
+    return ret;
+}
+
+int win32_recv( int socket, void *buffer, size_t length, int flags )
+{
+    WSABUF wsabuf = { length, (char*)buffer };
+    DWORD bytesRead;
+    int res = WSARecv(socket, &wsabuf, 1, &bytesRead, (PDWORD)&flags, NULL, NULL);
+    if (!res)
+        return bytesRead;
+    return -WSAGetLastError();
+}
+
+#define g_sys_socket_func 	::socket
+#define g_sys_connect_func  ::connect
+#define g_sys_close_func 	closesocket
+
+#define g_sys_read_func 		read
+#define g_sys_write_func 	write
+
+#define g_sys_sendto_func 	sendto
+#define g_sys_recvfrom_func recvfrom
+
+#define g_sys_send_func 		::send
+#define g_sys_recv_func 		win32_recv
+
+#define g_sys_poll_func 		win32_poll
+
+#define g_sys_setsockopt_func 
+										
+#define g_sys_fcntl_func 	fcntl
+
+#define g_sys_setenv_func   setenv
+#define g_sys_unsetenv_func unsetenv
+#define g_sys_getenv_func   getenv
+#define g_sys___res_state_func  __res_state
+
+#define g_sys_gethostbyname_func = gethostbyname
+#define g_sys_gethostbyname_r_func = gethostbyname_r
+#endif
 
 
 static inline unsigned long long get_tick_count()
@@ -170,8 +315,11 @@ struct rpchook_connagent_head_t
 	unsigned char    sReserved[6];
 }__attribute__((packed));
 
-
+#ifndef ZPort
 #define HOOK_SYS_FUNC(name) if( !g_sys_##name##_func ) { g_sys_##name##_func = (name##_pfn_t)dlsym(RTLD_NEXT,#name); }
+#else
+#define HOOK_SYS_FUNC(name) do { (#name); } while(0);
+#endif
 
 static inline ll64_t diff_ms(struct timeval &begin,struct timeval &end)
 {
@@ -234,7 +382,7 @@ int socket(int domain, int type, int protocol)
 	rpchook_t *lp = alloc_by_fd( fd );
 	lp->domain = domain;
 	
-	fcntl( fd, F_SETFL, g_sys_fcntl_func(fd, F_GETFL,0 ) );
+	//fcntl( fd, F_SETFL, g_sys_fcntl_func(fd, F_GETFL,0 ) );
 
 	return fd;
 }
@@ -301,7 +449,7 @@ int connect(int fd, const struct sockaddr *address, socklen_t address_len)
     // 3.check getsockopt ret
     int err = 0;
     socklen_t errlen = sizeof(err);
-    ret = getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &errlen);
+    ret = getsockopt(fd, SOL_SOCKET, SO_ERROR, (char*)&err, &errlen);
     if (ret < 0) {
       return ret;
     } else if (err != 0) {
@@ -495,19 +643,21 @@ ssize_t send(int socket, const void *buffer, size_t length, int flags)
 	
 	if( !co_is_enable_sys_hook() )
 	{
-		return g_sys_send_func( socket,buffer,length,flags );
+        printf("send disable hook\n");
+		return g_sys_send_func( socket,(char*)buffer,length,flags );
 	}
 	rpchook_t *lp = get_by_fd( socket );
 
 	if( !lp || ( O_NONBLOCK & lp->user_flag ) )
 	{
-		return g_sys_send_func( socket,buffer,length,flags );
+        printf("send nonblock(%d, %x, %d, %d)\n\n", socket,(char*)buffer,length,flags);
+		return g_sys_send_func( socket,(char*)buffer,length,flags );
 	}
 	size_t wrotelen = 0;
 	int timeout = ( lp->write_timeout.tv_sec * 1000 ) 
 				+ ( lp->write_timeout.tv_usec / 1000 );
 
-	ssize_t writeret = g_sys_send_func( socket,buffer,length,flags );
+	ssize_t writeret = g_sys_send_func( socket,(char*)buffer,length,flags );
 	if (writeret == 0)
 	{
 		return writeret;
@@ -529,12 +679,14 @@ ssize_t send(int socket, const void *buffer, size_t length, int flags)
 		
 		if( writeret <= 0 )
 		{
+            printf("send failed (%d, %x, %d, %d)\n", socket,(const char*)buffer + wrotelen,length - wrotelen,flags);
 			break;
 		}
 		wrotelen += writeret ;
 	}
 	if (writeret <= 0 && wrotelen == 0)
 	{
+        printf("send failed2 (%d, %x, %d, %d)", socket,(const char*)buffer + wrotelen,length - wrotelen,flags);
 		return writeret;
 	}
 	return wrotelen;
@@ -546,36 +698,106 @@ ssize_t recv( int socket, void *buffer, size_t length, int flags )
 	
 	if( !co_is_enable_sys_hook() )
 	{
-		return g_sys_recv_func( socket,buffer,length,flags );
+        printf("recv disable hook\n");
+		return g_sys_recv_func( socket,(char*)buffer,length,flags );
 	}
 	rpchook_t *lp = get_by_fd( socket );
 
 	if( !lp || ( O_NONBLOCK & lp->user_flag ) ) 
 	{
-		return g_sys_recv_func( socket,buffer,length,flags );
+        /// Z#20241231, doc
+        ///  O_NONBLOCK let your io issues EAGAIN/EWOULDBLOCK 
+        ///  let the caller poll by hand?
+        ///  !O_NONBLOCK, the recv must block, so let it poll(yield the coro rather than block thread) before recv.
+        ///  
+        ///  this function is like a co_read, or co_await read
+        ///  when O_NONBLOCK, it also need to help poll(suspend the coro) until the data income.
+        ///  the co_await async_read will resume if data income or socket broken, immel return EAGAIN/EWOULDBLOCK, that is unexpected.
+        printf("recv nonblock\n");
+		return g_sys_recv_func( socket,(char*)buffer,length,flags );
 	}
+	
+try_again:
 	int timeout = ( lp->read_timeout.tv_sec * 1000 ) 
 				+ ( lp->read_timeout.tv_usec / 1000 );
 
 	struct pollfd pf = { 0 };
 	pf.fd = socket;
 	pf.events = ( POLLIN | POLLERR | POLLHUP );
-
 	int pollret = poll( &pf,1,timeout );
 
-	ssize_t readret = g_sys_recv_func( socket,buffer,length,flags );
+	ssize_t readret = g_sys_recv_func( socket,(char*)buffer,length,flags );
 
+    if (readret < -1)
+    {
+        int err = co_setlasterror(-readret);
+        if (WSAEWOULDBLOCK == err)
+            goto try_again;
+    }
 	if( readret < 0 )
 	{
-		co_log_err("CO_ERR: read fd %d ret %ld errno %d poll ret %d timeout %d",
-					socket,readret,errno,pollret,timeout);
+		co_log_err("CO_ERR: recv fd %d ret %ld errno %d poll ret %d timeout %d event %x",
+					socket,readret,errno,pollret,timeout, pf.events);
 	}
 
 	return readret;
 	
 }
 
+#ifdef ZPort
+ssize_t await_recv( int socket, void *buffer, size_t length, int flags )
+{
+	HOOK_SYS_FUNC( recv ); 
+	
+    int ret = 0;
+	if( !co_is_enable_sys_hook() )
+	{
+        printf("await_recv disable hook\n");
+		return g_sys_recv_func( socket,(char*)buffer,length,flags );
+	}
+	rpchook_t *lp = get_by_fd( socket );
+
+	if( !lp || ( O_NONBLOCK & lp->user_flag ) ) 
+	{
+        /// Z#20241231, doc
+        ///  await_read will suspend and await when data income
+        printf("await_recv nonblock\n");
+		ret = g_sys_recv_func( socket,(char*)buffer,length,flags );
+        if (WSAEWOULDBLOCK != -ret)
+            return ret;
+	}
+	
+try_again:
+	int timeout = ( lp->read_timeout.tv_sec * 1000 ) 
+				+ ( lp->read_timeout.tv_usec / 1000 );
+
+	struct pollfd pf = { 0 };
+	pf.fd = socket;
+	pf.events = ( POLLIN | POLLERR | POLLHUP );
+	int pollret = poll( &pf,1,timeout );
+
+	ssize_t readret = g_sys_recv_func( socket,(char*)buffer,length,flags );
+
+    if (readret < -1)
+    {
+        int err = co_setlasterror(-readret);
+        if (WSAEWOULDBLOCK == err)
+            goto try_again;
+    }
+	if( readret < 0 )
+	{
+		co_log_err("CO_ERR: recv fd %d ret %ld errno %d poll ret %d timeout %d event %x",
+					socket,readret,errno,pollret,timeout, pf.events);
+	}
+
+	return readret;
+	
+}
+#endif
+
+#ifndef ZPort
 extern int co_poll_inner( stCoEpoll_t *ctx,struct pollfd fds[], nfds_t nfds, int timeout, poll_pfn_t pollfunc);
+#endif
 
 int poll(struct pollfd fds[], nfds_t nfds, int timeout)
 {
@@ -666,6 +888,7 @@ int fcntl(int fildes, int cmd, ...)
 	rpchook_t *lp = get_by_fd( fildes );
 	switch( cmd )
 	{
+#ifndef ZPort
 		case F_DUPFD:
 		{
 			int param = va_arg(arg_list,int);
@@ -735,6 +958,45 @@ int fcntl(int fildes, int cmd, ...)
 			ret = g_sys_fcntl_func( fildes,cmd,param );
 			break;
 		}
+#else
+        case F_GETFL: {
+            u_long mode = 0;
+            if (ioctlsocket(fildes, FIONBIO, &mode) == SOCKET_ERROR) {
+                ret = -1; // Handle error
+            } else {
+                ret = (mode ? O_NONBLOCK : 0);
+                if (lp && !(lp->user_flag & O_NONBLOCK)) {
+                    ret &= ~O_NONBLOCK;
+                }
+            }
+            break;
+        }
+
+        case F_SETFL: {
+            int param = va_arg(arg_list, int);
+            u_long mode = (param & O_NONBLOCK) ? 1 : 0;
+            if (ioctlsocket(fildes, FIONBIO, &mode) == SOCKET_ERROR) {
+                ret = -1; // Handle error
+            } else {
+                ret = 0; // Success
+                printf("set O_NONBLOCK ok\n");
+                if (lp) {
+                    lp->user_flag = param;
+                }
+            }
+            break;
+        }
+
+        case F_DUPFD: {
+            // No direct equivalent in Windows, implement as needed
+            printf("F_DUPFD not directly supported in Windows\n");
+            break;
+        }
+
+        default:
+            printf("Command %d not implemented for Windows\n", cmd);
+            break;
+#endif
 	}
 
 	va_end( arg_list );
@@ -901,6 +1163,7 @@ char *getenv( const char *n )
 }
 struct hostent* co_gethostbyname(const char *name);
 
+#ifndef ZPort
 struct hostent *gethostbyname(const char *name)
 {
 	HOOK_SYS_FUNC( gethostbyname );
@@ -1026,7 +1289,30 @@ struct hostent *co_gethostbyname(const char *name)
 	return NULL;
 }
 #endif
+#else
+/// MS tells us that https://msdn.microsoft.com/en-us/library/windows/desktop/ms738524%28v=vs.85%29.aspx
+/**
+ * The memory for the hostent structure returned by the 
+    gethostbyname function is allocated internally by the 
+    Winsock DLL from thread local storage. Only a single 
+    hostent structure is allocated and used, no matter how 
+    many times the gethostbyaddr or gethostbyname functions 
+    are called on the thread
+    */
+struct hostent *co_gethostbyname(const char *name)
+{
+	if (!name)
+	{
+		return NULL;
+	}
+	return ::gethostbyname(name);
+}
+#endif // ZPort
 
+
+#ifdef ZPort
+} // namespace libcow
+#endif 
 
 void co_enable_hook_sys() //这函数必须在这里,否则本文件会被忽略！！！
 {
@@ -1036,4 +1322,3 @@ void co_enable_hook_sys() //这函数必须在这里,否则本文件会被忽略
 		co->cEnableSysHook = 1;
 	}
 }
-

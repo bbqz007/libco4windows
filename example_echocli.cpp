@@ -16,6 +16,8 @@
 * limitations under the License.
 */
 
+#include "co_apis.h"
+using namespace libcow;
 #include "co_routine.h"
 
 #include <errno.h>
@@ -27,13 +29,32 @@
 #include <time.h>
 #include <stack>
 
+#ifndef ZPort
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <sys/un.h>
-#include <fcntl.h>
 #include <arpa/inet.h>
+#include <sys/wait.h>
+#else
+#include <winsock2.h>
+#endif
+#include <fcntl.h>
 #include <unistd.h>
 #include <signal.h>
+
+#include <vector>
+#include <thread>
+
+static int SetNonBlock(int iSock)
+{
+    int iFlags;
+
+    iFlags = libcow::fcntl(iSock, F_GETFL, 0);
+    iFlags |= O_NONBLOCK;
+    iFlags |= O_NDELAY;
+    int ret = libcow::fcntl(iSock, F_SETFL, iFlags);
+    return ret;
+}
 
 using namespace std;
 struct stEndPoint
@@ -63,9 +84,9 @@ static void SetAddr(const char *pszIP,const unsigned short shPort,struct sockadd
 
 }
 
-static int iSuccCnt = 0;
-static int iFailCnt = 0;
-static int iTime = 0;
+__thread int iSuccCnt = 0;
+__thread int iFailCnt = 0;
+__thread int iTime = 0;
 
 void AddSuccCnt()
 {
@@ -108,11 +129,13 @@ static void *readwrite_routine( void *arg )
 	char buf[ 1024 * 16 ];
 	int fd = -1;
 	int ret = 0;
+    co_sleepfor(1);
 	for(;;)
 	{
 		if ( fd < 0 )
 		{
-			fd = socket(PF_INET, SOCK_STREAM, 0);
+			fd = libcow::socket(PF_INET, SOCK_STREAM, 0);
+            printf("new socket: %d\n", fd);
 			struct sockaddr_in addr;
 			SetAddr(endpoint->ip, endpoint->port, addr);
 			ret = connect(fd,(struct sockaddr*)&addr,sizeof(addr));
@@ -127,11 +150,11 @@ static void *readwrite_routine( void *arg )
 				int error = 0;
 				uint32_t socklen = sizeof(error);
 				errno = 0;
-				ret = getsockopt(fd, SOL_SOCKET, SO_ERROR,(void *)&error,  &socklen);
+				ret = getsockopt(fd, SOL_SOCKET, SO_ERROR,(char *)&error,  (int*)&socklen);
 				if ( ret == -1 ) 
 				{       
 					//printf("getsockopt ERROR ret %d %d:%s\n", ret, errno, strerror(errno));
-					close(fd);
+					libcow::close(fd);
 					fd = -1;
 					AddFailCnt();
 					continue;
@@ -140,38 +163,39 @@ static void *readwrite_routine( void *arg )
 				{       
 					errno = error;
 					//printf("connect ERROR ret %d %d:%s\n", error, errno, strerror(errno));
-					close(fd);
+					libcow::close(fd);
 					fd = -1;
 					AddFailCnt();
 					continue;
 				}       
 			} 
-	  			
+			SetNonBlock(fd);
 		}
 		
-		ret = write( fd,str, 8);
+		ret = libcow::write( fd,str, 8);
 		if ( ret > 0 )
 		{
-			ret = read( fd,buf, sizeof(buf) );
+			ret = libcow::await_read( fd,buf, sizeof(buf) );
 			if ( ret <= 0 )
-			{
-				//printf("co %p read ret %d errno %d (%s)\n",
-				//		co_self(), ret,errno,strerror(errno));
-				close(fd);
+			{ 
+				printf("co %p read ret %d errno %d (%s)\n",
+						co_self(), ret,errno,strerror(errno));
+				libcow::close(fd);
 				fd = -1;
 				AddFailCnt();
 			}
 			else
 			{
-				//printf("echo %s fd %d\n", buf,fd);
+				printf("echo %s fd %d\n", buf,fd);
+                co_sleepfor(1);
 				AddSuccCnt();
 			}
 		}
-		else
+		else  
 		{
-			//printf("co %p write ret %d errno %d (%s)\n",
-			//		co_self(), ret,errno,strerror(errno));
-			close(fd);
+			printf("co %p write ret %d errno %d (%s)\n",
+					co_self(), ret,errno,strerror(errno));
+			libcow::close(fd);
 			fd = -1;
 			AddFailCnt();
 		}
@@ -181,38 +205,41 @@ static void *readwrite_routine( void *arg )
 
 int main(int argc,char *argv[])
 {
+    WORD wVersionRequested;
+    WSADATA wsaData;
+    wVersionRequested = MAKEWORD(2, 2);
+    WSAStartup(wVersionRequested, &wsaData);
+    
 	stEndPoint endpoint;
 	endpoint.ip = argv[1];
 	endpoint.port = atoi(argv[2]);
 	int cnt = atoi( argv[3] );
 	int proccnt = atoi( argv[4] );
 	
+#ifndef ZPort
 	struct sigaction sa;
 	sa.sa_handler = SIG_IGN;
 	sigaction( SIGPIPE, &sa, NULL );
+#endif
 	
+    std::vector<std::thread> children;
 	for(int k=0;k<proccnt;k++)
 	{
-
-		pid_t pid = fork();
-		if( pid > 0 )
-		{
-			continue;
-		}
-		else if( pid < 0 )
-		{
-			break;
-		}
-		for(int i=0;i<cnt;i++)
-		{
-			stCoRoutine_t *co = 0;
-			co_create( &co,NULL,readwrite_routine, &endpoint);
-			co_resume( co );
-		}
-		co_eventloop( co_get_epoll_ct(),0,0 );
-
-		exit(0);
+        children.emplace_back(std::move(
+            std::thread([=]{
+                for(int i=0;i<cnt;i++)
+                {
+                    stCoRoutine_t *co = 0;
+                    co_create( &co,NULL,readwrite_routine, (void*)&endpoint);
+                    co_resume( co );
+                }
+                co_eventloop( co_get_epoll_ct(),0,0 );
+            })));
 	}
+	for (auto& thr : children)
+        thr.join();
+    
+    WSACleanup();
 	return 0;
 }
 /*./example_echosvr 127.0.0.1 10000 100 50*/
