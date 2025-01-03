@@ -303,7 +303,21 @@ stStackMem_t* co_alloc_stackmem(unsigned int stack_size)
 	stStackMem_t* stack_mem = (stStackMem_t*)malloc(sizeof(stStackMem_t));
 	stack_mem->occupy_co= NULL;
 	stack_mem->stack_size = stack_size;
-	stack_mem->stack_buffer = (char*)malloc(stack_size);
+#ifdef FAILED_TEST_IF_CRASH_NOT_ON_STACKMEM
+    typedef struct _INITIAL_TEB
+        {
+            struct
+            {
+                PVOID OldStackBase;
+                PVOID OldStackLimit;
+            } OldInitialTeb;
+            PVOID StackBase;
+            PVOID StackLimit;
+            PVOID StackAllocationBase;
+        } INITIAL_TEB, *PINITIAL_TEB;
+    INITIAL_TEB* leakit = (INITIAL_TEB*)CreateFiber(stack_size, 0, 0);
+#endif
+	stack_mem->stack_buffer = (char*)malloc(stack_size); //(char*)leakit->StackLimit; //
 	stack_mem->stack_bp = stack_mem->stack_buffer + stack_size;
 	return stack_mem;
 }
@@ -488,12 +502,16 @@ static int CoRoutineFunc( stCoRoutine_t *co,void * )
 	return 0;
 }
 
+static void __stdcall win32Fiber_CoRoutineFunc(void* arg)
+{
+    auto* co = (stCoRoutine_t*)arg;
+    CoRoutineFunc(co, 0);
+}
 
 
 struct stCoRoutine_t *co_create_env( stCoRoutineEnv_t * env, const stCoRoutineAttr_t* attr,
 		pfn_co_routine_t pfn,void *arg )
 {
-
 	stCoRoutineAttr_t at;
 	if( attr )
 	{
@@ -524,15 +542,47 @@ struct stCoRoutine_t *co_create_env( stCoRoutineEnv_t * env, const stCoRoutineAt
 	lp->arg = arg;
 
 	stStackMem_t* stack_mem = NULL;
-	if( at.share_stack )
+	if( 0 && at.share_stack )
 	{
+        /// Z#20250103, doc
+        ///  disable 
 		stack_mem = co_get_stackmem( at.share_stack);
 		at.stack_size = at.share_stack->stack_size;
 	}
 	else
 	{
-		stack_mem = co_alloc_stackmem(at.stack_size);
+        /// Z#20250103, doc
+        ///  window:subsystem, should use Fiber api to satify the TEB.
+        ///  the concolse:subsystem, does not matter.
+#ifdef ZPort
+        if (GetModuleHandleA("user32.dll"))
+        {
+            stack_mem = co_alloc_stackmem(0);
+            typedef struct _INITIAL_TEB
+            {
+                struct
+                {
+                    PVOID OldStackBase;
+                    PVOID OldStackLimit;
+                } OldInitialTeb;
+                PVOID StackBase;
+                PVOID StackLimit;
+                PVOID StackAllocationBase;
+            } INITIAL_TEB, *PINITIAL_TEB;
+            
+            lp->win32_fiber = CreateFiber(at.stack_size, 
+                                        (LPFIBER_START_ROUTINE)win32Fiber_CoRoutineFunc, 
+                                        (void*)lp);
+            INITIAL_TEB* pteb = (INITIAL_TEB*)lp->win32_fiber;
+            stack_mem->stack_buffer = (char*)pteb->StackLimit;
+            stack_mem->stack_size = (char*)pteb->StackBase - (char*)pteb->StackLimit - 8;
+            stack_mem->stack_bp = (char*)stack_mem->stack_buffer + stack_mem->stack_size;
+        }
+        else
+#endif // ZPort
+            stack_mem = co_alloc_stackmem(at.stack_size);
 	}
+	
 	lp->stack_mem = stack_mem;
 
 	lp->ctx.ss_sp = stack_mem->stack_buffer;
@@ -593,13 +643,22 @@ void co_resume( stCoRoutine_t *co )
 	stCoRoutine_t *lpCurrRoutine = env->pCallStack[ env->iCallStackSize - 1 ];
 	if( !co->cStart )
 	{
+#ifdef ZPort
+        if (co->win32_fiber)
+            ;/// Fiber not support reset
+        else
+#endif // ZPort
 		coctx_make( &co->ctx,(coctx_pfn_t)CoRoutineFunc,co,0 );
 		co->cStart = 1;
 	}
 	env->pCallStack[ env->iCallStackSize++ ] = co;
+    
+#ifdef ZPort
+    if (co->win32_fiber)
+        SwitchToFiber(co->win32_fiber);
+    else
+#endif
 	co_swap( lpCurrRoutine, co );
-
-
 }
 
 
@@ -634,7 +693,13 @@ void co_yield_env( stCoRoutineEnv_t *env )
 
 	env->iCallStackSize--;
 
-	co_swap( curr, last);
+#ifdef ZPort
+    if (last->win32_fiber)
+        SwitchToFiber(last->win32_fiber);
+	else
+#endif // ZPort
+        co_swap( curr, last);
+    
 }
 
 void co_yield_ct()
@@ -771,6 +836,7 @@ static short EpollEvent2Poll( uint32_t events )
 
 static __thread stCoRoutineEnv_t* gCoEnvPerThread = NULL;
 
+#ifdef ZPort
 void co_uninit_curr_thread_env()
 {
     /// Z#20250103
@@ -788,6 +854,7 @@ void co_uninit_curr_thread_env()
     
     printf("damage the tencent/libco, every thing has no uninit()\n");
 }
+#endif // ZPort
 
 void co_init_curr_thread_env()
 {
@@ -807,9 +874,14 @@ void co_init_curr_thread_env()
 
 	stCoEpoll_t *ev = AllocEpoll();
 	SetEpoll( env,ev );
-    
+#ifdef ZPort    
     env->cond_sleepfor = co_cond_alloc();    /// Z#20250103
+    if (GetModuleHandleA("user32.dll"))
+        self->win32_fiber = ConvertThreadToFiber(0);
+#endif
 }
+
+
 stCoRoutineEnv_t *co_get_curr_thread_env()
 {
 	return gCoEnvPerThread;

@@ -62,10 +62,10 @@ static int SetNonBlock(int iSock)
 {
     int iFlags;
 
-    iFlags = fcntl(iSock, F_GETFL, 0);
+    iFlags = libcow::fcntl(iSock, F_GETFL, 0);
     iFlags |= O_NONBLOCK;
     iFlags |= O_NDELAY;
-    int ret = fcntl(iSock, F_SETFL, iFlags);
+    int ret = libcow::fcntl(iSock, F_SETFL, iFlags);
     return ret;
 }
 
