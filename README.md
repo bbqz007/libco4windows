@@ -19,3 +19,6 @@ at first, i want to port this libco to windows for the compiler which can not us
 and i also found, on windows there is no choice than Fiber api because of the TEB, if the coro implement is base on stackful. the Fiber eat 2m vm at least. thus on windows, stackless std::cocoroutine maybe a better choice.
 
 i have no idea that, if program under the console:subsys, it can run fine only using simple assembly switch. thus i port it to find whether using a user32.dll, then make a decition to use Fiber or not. the Native Fiber preforms so bad you can not believe it.
+
+the tencent/libco is a eventloop framework implemented using stackful coroutines. each coro is equals to a connection object which can be event handler to epoll. each coro has a 4k object and 128k by default private stack. 
+the purpose of tencent/libco, maybe hook read api to make the blocking io pragramming codes can performs async on one thread one eventloop. this can reduce much work to change eventloop framework for many third software in your projet. out of this usage, it seem to not be a coro library what you consider. 
