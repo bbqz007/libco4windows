@@ -2,7 +2,7 @@
 porting tencent/libco to windows with wepoll.
 short name is libcow.
 
-https://github.com/bbqz007/libco4window
+https://github.com/bbqz007/libco4windows
 
 # summary
 this is a experiment work. and it is buggy as libco codes. 
