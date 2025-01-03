@@ -21,4 +21,7 @@ and i also found, on windows there is no choice than Fiber api because of the TE
 i have no idea that, if program under the console:subsys, it can run fine only using simple assembly switch. thus i port it to find whether using a user32.dll, then make a decition to use Fiber or not. the Native Fiber preforms so bad you can not believe it.
 
 the tencent/libco is a eventloop framework implemented using stackful coroutines. each coro is equals to a connection object which can be event handler to epoll. each coro has a 4k object and 128k by default private stack. 
+
 the purpose of tencent/libco, maybe hook read api to make the blocking io pragramming codes can performs async on one thread one eventloop. this can reduce much work to change eventloop framework for many third software in your projet. out of this usage, it seem to not be a coro library what you consider. 
+
+in thery use cases, the coro is not a small piece task. the coro is actually an object though all the program life. so they never care how and when to release, and the a lot of coro creating and releasing. even that they seems never do release.
