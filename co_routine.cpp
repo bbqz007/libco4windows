@@ -632,6 +632,11 @@ void co_free( stCoRoutine_t *co )
 }
 void co_release( stCoRoutine_t *co )
 {
+#ifdef ZPort
+    if (co->win32_fiber)
+        DeleteFiber(co->win32_fiber);
+    co->win32_fiber = 0;
+#endif
     co_free( co );
 }
 
