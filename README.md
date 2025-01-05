@@ -8,7 +8,7 @@ https://github.com/bbqz007/libco4windows
 this is a experiment work. and it is buggy as libco codes. 
 
 can you see a piece fo codes from big software corp.
-* env,coctx, only have init(), but not uninit()
+* env, only have init(), but not uninit()
 * the epoll resources never free by calling FreeEpoll()
 * all the codes never call the co_release()
 * they who wrote the tencent/libco never thought about how to make everything correctly release and quit.
