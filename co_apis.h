@@ -55,6 +55,7 @@ namespace libcow
         return libcow::await_recv(fd, buf, nbyte, 0);
     }
     extern int close(int fd);
+    extern void co_disable_win32fiber_backend();
 };
 
 #endif //_co_apis_h_

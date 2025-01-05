@@ -397,6 +397,7 @@ int co_accept( int fd, struct sockaddr *addr, socklen_t *len )
 	alloc_by_fd( cli );
 	return cli;
 }
+
 int connect(int fd, const struct sockaddr *address, socklen_t address_len)
 {
 	HOOK_SYS_FUNC( connect );
@@ -463,6 +464,77 @@ int connect(int fd, const struct sockaddr *address, socklen_t address_len)
   errno = ETIMEDOUT;
 	return ret;
 }
+
+#ifdef ZPort
+int await_connect(int fd, const struct sockaddr *address, socklen_t address_len)
+{
+	HOOK_SYS_FUNC( connect );
+
+	if( !co_is_enable_sys_hook() )
+	{
+		return g_sys_connect_func(fd,address,address_len);
+	}
+
+	//1.sys call
+	int ret = g_sys_connect_func( fd,address,address_len );
+    int lasterror = WSAGetLastError();
+
+	rpchook_t *lp = get_by_fd( fd );
+	if( !lp ) return ret;
+
+	if( sizeof(lp->dest) >= address_len )
+	{
+		 memcpy( &(lp->dest),address,(int)address_len );
+	}
+	if( O_NONBLOCK & lp->user_flag ) 
+	{
+        if (WSAEWOULDBLOCK != lasterror)
+            return ret;
+	}
+	
+	if (!(ret < 0 && errno == EINPROGRESS))
+	{
+		return ret;
+	}
+
+	//2.wait
+	int pollret = 0;
+	struct pollfd pf = { 0 };
+
+	for(int i=0;i<3;i++) //25s * 3 = 75s
+	{
+		memset( &pf,0,sizeof(pf) );
+		pf.fd = fd;
+		pf.events = ( POLLOUT | POLLERR | POLLHUP );
+
+		pollret = poll( &pf,1,25000 );
+
+		if( 1 == pollret  )
+		{
+			break;
+		}
+	}
+
+	if( pf.revents & POLLOUT ) //connect succ
+	{
+    // 3.check getsockopt ret
+    int err = 0;
+    socklen_t errlen = sizeof(err);
+    ret = getsockopt(fd, SOL_SOCKET, SO_ERROR, (char*)&err, &errlen);
+    if (ret < 0) {
+      return ret;
+    } else if (err != 0) {
+      errno = err;
+      return -1;
+    }
+    errno = 0;
+    return 0;
+  }
+
+  errno = ETIMEDOUT;
+	return ret;
+}
+#endif
 
 
 int close(int fd)

@@ -22,6 +22,7 @@ set(SOURCE_FILES
         co_routine.cpp
         coctx.cpp
         coctx_swap.S
+        zport_coctx_swap.S
         wepoll.c)
 
 # Add static and shared library target

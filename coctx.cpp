@@ -90,7 +90,37 @@ int coctx_init(coctx_t* ctx) {
   memset(ctx, 0, sizeof(*ctx));
   return 0;
 }
+#ifdef ZPort
+enum {
+    kFS0 = 0,
+    kFS4 = 2,
+    kFS8 = 3,
+};
 int coctx_make(coctx_t* ctx, coctx_pfn_t pfn, const void* s, const void* s1) {
+    /// Z#20250105, doc
+    ///  ret to __fastcall zport_coctx_swap(const void* s, const void* s1)
+  // make room for coctx_param
+  char* sp = ctx->ss_sp + ctx->ss_size - sizeof(coctx_param_t);
+  sp = (char*)((unsigned long)sp & -16L);
+
+  coctx_param_t* param = (coctx_param_t*)sp;
+  void** ret_addr = (void**)(sp - sizeof(coctx_param_t));
+  *ret_addr = (void*)pfn;
+  param->s1 = s;
+  param->s2 = s1;
+
+  memset(ctx->regs, 0, sizeof(ctx->regs));
+
+  ctx->regs[kFS0] = (void*)-1;
+  ctx->regs[kFS4] = ctx->ss_sp + ctx->ss_size;
+  ctx->regs[kFS8] = ctx->ss_sp;
+  ctx->regs[kESP] = (char*)(sp) - sizeof(coctx_param_t);
+  return 0;
+}
+#else
+int coctx_make(coctx_t* ctx, coctx_pfn_t pfn, const void* s, const void* s1) {
+    /// Z#20250105, doc
+    ///  make call frame for pfn
   // make room for coctx_param
   char* sp = ctx->ss_sp + ctx->ss_size - sizeof(coctx_param_t);
   sp = (char*)((unsigned long)sp & -16L);
@@ -106,6 +136,7 @@ int coctx_make(coctx_t* ctx, coctx_pfn_t pfn, const void* s, const void* s1) {
   ctx->regs[kESP] = (char*)(sp) - sizeof(void*) * 2;
   return 0;
 }
+#endif // ZPort
 #elif defined(__x86_64__)
 int coctx_make(coctx_t* ctx, coctx_pfn_t pfn, const void* s, const void* s1) {
   char* sp = ctx->ss_sp + ctx->ss_size - sizeof(void*);

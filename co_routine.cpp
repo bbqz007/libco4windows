@@ -69,6 +69,14 @@ extern "C"
 {
 	extern void coctx_swap( coctx_t *,coctx_t* ) asm("_coctx_swap");
 };
+#ifdef ZPort
+extern "C" void __fastcall zport_coctx_swap( coctx_t *,coctx_t* ) asm("_zport_coctx_swap");
+static g_disable_win32fiber = false;
+void co_disable_win32fiber_backend()
+{
+    g_disable_win32fiber = true;
+}
+#endif // ZPort
 using namespace std;
 stCoRoutine_t *GetCurrCo( stCoRoutineEnv_t *env );
 struct stCoEpoll_t;
@@ -555,7 +563,7 @@ struct stCoRoutine_t *co_create_env( stCoRoutineEnv_t * env, const stCoRoutineAt
         ///  window:subsystem, should use Fiber api to satify the TEB.
         ///  the concolse:subsystem, does not matter.
 #ifdef ZPort
-        if (GetModuleHandleA("user32.dll"))
+        if (!g_disable_win32fiber && GetModuleHandleA("user32.dll"))
         {
             stack_mem = co_alloc_stackmem(0);
             typedef struct _INITIAL_TEB
@@ -634,7 +642,13 @@ void co_release( stCoRoutine_t *co )
 {
 #ifdef ZPort
     if (co->win32_fiber)
-        DeleteFiber(co->win32_fiber);
+    {
+        if (!co->cIsMain)
+            DeleteFiber(co->win32_fiber);
+        else
+            ConvertFiberToThread();
+        co->stack_mem->stack_buffer = 0;            /// win32 fiber createUseStack, never alloc stack buffer
+    }
     co->win32_fiber = 0;
 #endif
     co_free( co );
@@ -763,7 +777,11 @@ void co_swap(stCoRoutine_t* curr, stCoRoutine_t* pending_co)
 	}
 
 	//swap context
+#if defined(__i386__)
+    zport_coctx_swap(&(curr->ctx),&(pending_co->ctx) );
+#else
 	coctx_swap(&(curr->ctx),&(pending_co->ctx) );
+#endif
 
 	//stack buffer may be overwrite, so get again;
 	stCoRoutineEnv_t* curr_env = co_get_curr_thread_env();
@@ -881,8 +899,12 @@ void co_init_curr_thread_env()
 	SetEpoll( env,ev );
 #ifdef ZPort    
     env->cond_sleepfor = co_cond_alloc();    /// Z#20250103
-    if (GetModuleHandleA("user32.dll"))
+    if (!g_disable_win32fiber && GetModuleHandleA("user32.dll"))
+    {
         self->win32_fiber = ConvertThreadToFiber(0);
+        if (!self->win32_fiber)
+            self->win32_fiber = GetCurrentFiber();
+    }
 #endif
 }
 
