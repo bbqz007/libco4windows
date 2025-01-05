@@ -74,7 +74,9 @@ extern "C" void __fastcall zport_coctx_swap( coctx_t *,coctx_t* ) asm("_zport_co
 static g_disable_win32fiber = false;
 void co_disable_win32fiber_backend()
 {
+#if defined(__i386__)
     g_disable_win32fiber = true;
+#endif
 }
 #endif // ZPort
 using namespace std;
