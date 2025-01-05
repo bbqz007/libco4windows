@@ -25,3 +25,6 @@ the tencent/libco is a eventloop framework implemented using stackful coroutines
 the purpose of tencent/libco, maybe hook read api to make the blocking io pragramming codes can performs async on one thread one eventloop. this can reduce much work to change eventloop framework for many third software in your projet. out of this usage, it seem to not be a coro library what you consider. 
 
 in thery use cases, the coro is not a small piece task. the coro is actually an object though all the program life. so they never care how and when to release, and the a lot of coro creating and releasing. even that they seems never do release.
+
+### 20250105
+solve TIB swap. thanks to semistrict/libcoro.
