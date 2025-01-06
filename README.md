@@ -28,3 +28,12 @@ in thery use cases, the coro is not a small piece task. the coro is actually an 
 
 ### 20250105
 solve TIB swap. thanks to semistrict/libcoro.
+
+### why disable the share stack
+``` c++
+///  share_stack can lead bad perf
+///  suppose there c1 and c2 share a same stack
+///  if c1 resume then c2, c1, c2, ...
+///  now c1, c2 both have save_buffer, there are 3 pieces stack in momery.
+///  and increase so many copy out and copy in.
+```
