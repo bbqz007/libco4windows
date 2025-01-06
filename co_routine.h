@@ -85,12 +85,6 @@ void 	co_eventloop( stCoEpoll_t *ctx,pfn_co_eventloop_t pfn,void *arg );
 int 	co_setspecific( pthread_key_t key, const void *value );
 void *	co_getspecific( pthread_key_t key );
 
-#ifdef ZPort
-int co_getlasterror();
-int co_setlasterror(int);
-void co_sleepfor(int/**ms*/);
-#endif
-
 //4.event
 
 stCoEpoll_t * 	co_get_epoll_ct(); //ct = current thread

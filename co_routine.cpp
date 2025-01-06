@@ -44,6 +44,7 @@
 #include <stdio.h>
 #include <string>
 #include <map>
+#include <deque>
 
 #ifndef ZPort
 #include <poll.h>
@@ -71,7 +72,7 @@ extern "C"
 };
 #ifdef ZPort
 extern "C" void __fastcall zport_coctx_swap( coctx_t *,coctx_t* ) asm("_zport_coctx_swap");
-static g_disable_win32fiber = false;
+static bool g_disable_win32fiber = false;
 void co_disable_win32fiber_backend()
 {
 #if defined(__i386__)
@@ -95,6 +96,10 @@ struct stCoRoutineEnv_t
     
     /// Z#20250103
     stCoCond_t* cond_sleepfor;
+    
+#ifdef ZPort
+    void* main_win32fiber;
+#endif
 };
 //int socket(int domain, int type, int protocol);
 void co_log_err( const char *fmt,... )
@@ -536,11 +541,30 @@ struct stCoRoutine_t *co_create_env( stCoRoutineEnv_t * env, const stCoRoutineAt
 		at.stack_size = 1024 * 1024 * 8;
 	}
 
+#ifndef ZPort
 	if( at.stack_size & 0xFFF ) 
 	{
 		at.stack_size &= ~0xFFF;
 		at.stack_size += 0x1000;
 	}
+#else
+    if (at.stack_size > 0x1000)
+    {
+        if( at.stack_size & 0xFFF ) 
+        {
+            at.stack_size &= ~0xFFF;
+            at.stack_size += 0x1000;
+        }
+    }
+    else
+    {
+        if( at.stack_size & 0xff ) 
+        {
+            at.stack_size &= ~0xFF;
+            at.stack_size += 0x100;
+        }
+    }
+#endif
 
 	stCoRoutine_t *lp = (stCoRoutine_t*)malloc( sizeof(stCoRoutine_t) );
 	
@@ -556,6 +580,12 @@ struct stCoRoutine_t *co_create_env( stCoRoutineEnv_t * env, const stCoRoutineAt
 	{
         /// Z#20250103, doc
         ///  disable 
+        /// Z#20250107, doc
+        ///  share_stack can lead bad perf
+        ///  suppose there c1 and c2 share a same stack
+        ///  if c1 resume then c2, c1, c2, ...
+        ///  now c1, c2 both have save_buffer, there are 3 pieces stack in momery.
+        ///  and increase so many copy out and copy in.
 		stack_mem = co_get_stackmem( at.share_stack);
 		at.stack_size = at.share_stack->stack_size;
 	}
@@ -602,7 +632,13 @@ struct stCoRoutine_t *co_create_env( stCoRoutineEnv_t * env, const stCoRoutineAt
 	lp->cEnd = 0;
 	lp->cIsMain = 0;
 	lp->cEnableSysHook = 0;
+#ifndef ZPort
 	lp->cIsShareStack = at.share_stack != NULL;
+#else
+    lp->cIsShareStack = 0;
+    lp->p_aSpec = 0;
+    lp->p_apfnSpecDestroy = 0;
+#endif
 
 	lp->save_size = 0;
 	lp->save_buffer = NULL;
@@ -652,6 +688,26 @@ void co_release( stCoRoutine_t *co )
         co->stack_mem->stack_buffer = 0;            /// win32 fiber createUseStack, never alloc stack buffer
     }
     co->win32_fiber = 0;
+    
+    if (co->p_apfnSpecDestroy)
+    {
+        typedef std::pair<pthread_key_t, void(*)(void*)> SpecDestroyItem_t;
+        auto& pfns = *(std::deque<SpecDestroyItem_t>*)co->p_apfnSpecDestroy;
+        for (auto pfn : pfns)
+        {
+            if (co->p_aSpec && pfn.first < 1024)
+            {
+                pfn.second(co->p_aSpec[pfn.first].value);
+            }
+        }
+        delete (std::deque<void(*)()> *)co->p_apfnSpecDestroy;
+        co->p_apfnSpecDestroy = 0;
+    }
+    
+    if (co->pfn_argDestroy)
+    {
+        co->pfn_argDestroy(co->arg);
+    }
 #endif
     co_free( co );
 }
@@ -682,7 +738,18 @@ void co_resume( stCoRoutine_t *co )
 	co_swap( lpCurrRoutine, co );
 }
 
-
+/// Z#20250107, doc
+///  this is a stXpXd api
+///  this api would let a stackful coroutine, reenter again.
+///  in normal huamn mind, a coroutine ends, you can release the resources which the arg takes
+///  this api break normal rules.
+///  if a coro never run to the end, and reset it to reenter. the local object never run destructor and leak them.
+/// their examples show us that, the coroutine has a endless loop, for reuse the coro as an object
+///  so they need do efforts in the loop inside the routine, rather than this api directly break rules.
+///
+/// in my opinion, reuse the resources of a coro, need it bind a new function and arg to enter a new flow.
+///  the last corotinue ends the flow, the arg must not be reused.
+#if 0
 // walkerdu 2018-01-14                                                                              
 // 用于reset超时无法重复使用的协程                                                                  
 void co_reset(stCoRoutine_t * co)
@@ -705,6 +772,7 @@ void co_reset(stCoRoutine_t * co)
     if(co->stack_mem->occupy_co == co)
         co->stack_mem->occupy_co = NULL;
 }
+#endif
 
 void co_yield_env( stCoRoutineEnv_t *env )
 {
@@ -879,6 +947,11 @@ void co_uninit_curr_thread_env()
     
     printf("damage the tencent/libco, every thing has no uninit()\n");
 }
+
+void __stdcall fls_uninit_curr_thread_env(void*)
+{
+    co_uninit_curr_thread_env();
+}
 #endif // ZPort
 
 void co_init_curr_thread_env()
@@ -901,9 +974,15 @@ void co_init_curr_thread_env()
 	SetEpoll( env,ev );
 #ifdef ZPort    
     env->cond_sleepfor = co_cond_alloc();    /// Z#20250103
+    /// Z#20250107
+    env->main_win32fiber = ConvertThreadToFiber(0);
+    auto slot = FlsAlloc(fls_uninit_curr_thread_env);
+    FlsSetValue(slot, env);
+    ConvertFiberToThread();
     if (!g_disable_win32fiber && GetModuleHandleA("user32.dll"))
     {
-        self->win32_fiber = ConvertThreadToFiber(0);
+        self->win32_fiber = env->main_win32fiber;
+        ConvertThreadToFiber(0);
         if (!self->win32_fiber)
             self->win32_fiber = GetCurrentFiber();
     }
@@ -1210,6 +1289,7 @@ struct stHookPThreadSpec_t
 		size = 1024
 	};
 };
+stCoSpec_t* co_coro_getSpecArray(stCoRoutine_t* co);
 void *co_getspecific(pthread_key_t key)
 {
 	stCoRoutine_t *co = GetCurrThreadCo();
@@ -1217,7 +1297,11 @@ void *co_getspecific(pthread_key_t key)
 	{
 		return pthread_getspecific( key );
 	}
+#ifndef ZPort
 	return co->aSpec[ key ].value;
+#else
+    return co_coro_getSpecArray(co)[key].value;
+#endif
 }
 int co_setspecific(pthread_key_t key, const void *value)
 {
@@ -1226,11 +1310,33 @@ int co_setspecific(pthread_key_t key, const void *value)
 	{
 		return pthread_setspecific( key,value );
 	}
+#ifndef ZPort
 	co->aSpec[ key ].value = (void*)value;
+#else
+    co_coro_getSpecArray(co)[ key ].value = (void*)value;
+#endif
 	return 0;
 }
 
 #ifdef ZPort
+stCoSpec_t* co_coro_getSpecArray(stCoRoutine_t* co)
+{
+    if (!co->p_aSpec)
+    {
+        co->p_aSpec = (stCoSpec_t*) malloc(sizeof(stCoSpec_t)*1024);
+        memset(co->p_aSpec, 0, sizeof(stCoSpec_t)*1024);
+    }
+    
+    return co->p_aSpec;
+}
+
+std::deque<std::pair<pthread_key_t, void(*)(void*)> >* co_coro_getSpecDestroyArray(stCoRoutine_t* co)
+{
+    if (!co->p_apfnSpecDestroy)
+        co->p_apfnSpecDestroy = (void*) new std::deque<std::pair<pthread_key_t, void(*)(void*)> >;
+    return (std::deque<std::pair<pthread_key_t, void(*)(void*)> > *)co->p_apfnSpecDestroy;
+}
+
 int co_getlasterror()
 {
     stCoRoutine_t *co = GetCurrThreadCo();
@@ -1242,7 +1348,8 @@ int co_getlasterror()
 	///  the correct usage of co->aSpec is by class clsRoutineData_routine_##name
 	///  it can alloc a right key
 	///  a customer key must conflict to clsRoutineData_routine_##name or pthread_create_key.
-	return (int)co->aSpec[ sizeof(co->aSpec)/sizeof(co->aSpec[0])-1 ].value;
+	//return (int)co->aSpec[ sizeof(co->aSpec)/sizeof(co->aSpec[0])-1 ].value;
+	return co->last_error;
 }
 int co_setlasterror(int err)
 {
@@ -1251,7 +1358,8 @@ int co_setlasterror(int err)
 	{
 		return WSASetLastError(err), err;
 	}
-	(int&)co->aSpec[ sizeof(co->aSpec)/sizeof(co->aSpec[0])-1 ].value = err;
+	//(int&)co->aSpec[ sizeof(co->aSpec)/sizeof(co->aSpec[0])-1 ].value = err;
+	co->last_error = err;
     return err;
 }
 void co_sleepfor(int ms)
@@ -1261,6 +1369,24 @@ void co_sleepfor(int ms)
     {
         co_cond_timedwait(env->cond_sleepfor, ms);
         return;
+    }
+}
+
+void co_self_set_arg_destroy(void(*destroy)(void*))
+{
+    stCoRoutine_t *co = GetCurrThreadCo();
+    if (co && !co->cIsMain)
+    {
+        co->pfn_argDestroy = destroy;
+    }
+}
+void co_self_set_spec_destroy(pthread_key_t key, void(*destroy)(void*))
+{
+    stCoRoutine_t *co = GetCurrThreadCo();
+    if (co && !co->cIsMain)
+    {
+        auto* dequ = co_coro_getSpecDestroyArray(co);
+        dequ->push_back({key, destroy});
     }
 }
 #endif

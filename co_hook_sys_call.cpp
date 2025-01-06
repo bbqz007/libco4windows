@@ -137,6 +137,8 @@ typedef struct tm *(*localtime_r_pfn_t)( const time_t *timep, struct tm *result 
 
 #ifdef ZPort
 extern int co_poll_inner(stCoEpoll_t*, pollfd*, unsigned long, int, int (*)(pollfd*, unsigned long, int));
+extern int co_getlasterror();
+extern int co_setlasterror(int);
 namespace libcow
 {
 #endif 
@@ -292,7 +294,8 @@ int win32_recv( int socket, void *buffer, size_t length, int flags )
 
 #define g_sys_gethostbyname_func = gethostbyname
 #define g_sys_gethostbyname_r_func = gethostbyname_r
-#endif
+
+#endif // ZPort
 
 
 static inline unsigned long long get_tick_count()
